@@ -1,5 +1,7 @@
 # SkillGen: Verified Inference-Time Agent Skill Synthesis
+
 ## (NeurIPS 2026)
+
 
 ![SkillGen overview: baseline elicitation, contrastive behavioral induction, and generation-verification-refinement](assets/skillgen-overview.png)
 
@@ -134,6 +136,5 @@ If you find this repository useful, please cite our paper:
   author={Ma, Yuchen and Huang, Yue and Bao, Han and Zhuang, Haomin and Shukla, Swadheen and Galley, Michel and Zhang, Xiangliang and Feuerriegel, Stefan},
   booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
   year={2026},
-  url={https://arxiv.org/abs/2605.10999}
 }
 ```
