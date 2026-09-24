@@ -1,4 +1,5 @@
-# SkillGen (NeurIPS 2026)
+# SkillGen: Verified Inference-Time Agent Skill Synthesis
+## (NeurIPS 2026)
 
 ![SkillGen overview: baseline elicitation, contrastive behavioral induction, and generation-verification-refinement](assets/skillgen-overview.png)
 
