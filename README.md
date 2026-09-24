@@ -1,6 +1,8 @@
-# SkillGen
+# SkillGen (NeurIPS 2026)
 
-Code for the paper: **SkillGen**: Verified Inference-Time Agent Skill Synthesis
+![SkillGen overview: baseline elicitation, contrastive behavioral induction, and generation-verification-refinement](assets/skillgen-overview.png)
+
+Official implementation of **[SkillGen: Verified Inference-Time Agent Skill Synthesis](https://arxiv.org/abs/2605.10999)**, accepted at **NeurIPS 2026**.
 
 ## Requirements
 
@@ -125,12 +127,12 @@ skillgen_paper/
 
 If you find this repository useful, please cite our paper:
 
-```
-@article{ma2026skillgen,
+```bibtex
+@inproceedings{ma2026skillgen,
   title={{SkillGen}: Verified Inference-Time Agent Skill Synthesis},
   author={Ma, Yuchen and Huang, Yue and Bao, Han and Zhuang, Haomin and Shukla, Swadheen and Galley, Michel and Zhang, Xiangliang and Feuerriegel, Stefan},
-  journal={arXiv preprint},
-  year={2026}
+  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
+  year={2026},
+  url={https://arxiv.org/abs/2605.10999}
 }
-
 ```
