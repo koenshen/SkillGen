@@ -77,6 +77,32 @@ python scripts/prepare_toolbench.py --subset G1_instruction --train-n 120 --test
 python scripts/prepare_tau_bench.py -o data/tau_bench.json
 ```
 
+## SkillOpt SearchQA
+
+From the SkillGen root, the default data directory is `../SkillOpt/data/searchqa_split`.
+Only its three `items.json` files are needed. Set `SEARCHQA_SPLIT_DIR` or pass
+`--split-dir` to use the same payloads at a different path. The adapter verifies
+the fixed ordered ID lists and constructs and scores each example locally.
+Check the data without loading a model:
+
+```bash
+python -m benchmarks.searchqa --check
+```
+
+To train and test, give the command a new output directory:
+
+```bash
+python -m benchmarks.searchqa --config config.yaml --output outputs/searchqa-run1
+```
+
+The pipeline learns from the 400 train items. It caches one no-skill response
+on each of the 200 dev items, then uses the original paired verification and
+refinement rules on the entire dev set. The benchmark replaces the generic
+LLM outcome judge with SkillOpt normalized EM; the other agent roles and
+thresholds follow the supplied configuration. Test reports EM and token F1 on
+all 1,400 fixed items. A rejected skill reuses the no-skill test result.
+Use `--skill-repo <timestamped-skill-directory>` to evaluate a saved run.
+
 ## Configuration
 
 All hyperparameters are in `config.yaml`. The most commonly adjusted fields:

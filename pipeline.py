@@ -109,8 +109,16 @@ def run_pipeline(
     dataset_metadata: dict | None = None,
     generate_scripts: bool | None = None,
     resume_dir: str | None = None,
+    verification_instances: list[TaskInstance] | None = None,
 ):
     """End-to-end single-skill discovery pipeline."""
+
+    if verification_instances is not None:
+        dev_ids = {i.instance_id for i in verification_instances}
+        if not dev_ids or len(dev_ids) != len(verification_instances):
+            raise ValueError("Fixed verification instances require unique IDs and a nonempty split")
+        if dev_ids.intersection(i.instance_id for i in instances):
+            raise ValueError("Fixed verification instances overlap the training set")
 
     cfg = load_config(config_path)
     llm_cfg = cfg["llm"]
@@ -280,31 +288,43 @@ def run_pipeline(
     )
 
     # Stage 3: Generation / Refinement / Verification loop
-    sample_size_cfg = ver_cfg.get("sample_size")
-    min_sample = int(ver_cfg.get("min_sample", ver_cfg.get("min_holdout", 4)))
-    seed = int(ver_cfg.get("seed", 42))
-
-    if sample_size_cfg is not None:
-        sample_size = int(sample_size_cfg)
+    if verification_instances is not None:
+        with llm.stage_scope("dev_baseline"):
+            dev_trajs = collect_trajectories(
+                verification_instances, task_type, config=baseline_agent_cfg,
+                max_workers=pipe_cfg.get("max_workers", 16), progress_desc="Dev baseline",
+            )
+        write_trajectories(run_dir / "dev_baseline.jsonl", dev_trajs)
+        baseline_cache = {t.instance_id: t for t in dev_trajs}
+        target_failures = [i for i in verification_instances if not baseline_cache[i.instance_id].success]
+        success_guard = [i for i in verification_instances if baseline_cache[i.instance_id].success]
+        log.info("Fixed dev | %d failures, %d successes", len(target_failures), len(success_guard))
     else:
-        holdout_ratio = float(ver_cfg.get("holdout_ratio", 0.3))
-        sample_size = max(min_sample, int(len(inst_map) * holdout_ratio))
+        sample_size_cfg = ver_cfg.get("sample_size")
+        min_sample = int(ver_cfg.get("min_sample", ver_cfg.get("min_holdout", 4)))
+        seed = int(ver_cfg.get("seed", 42))
 
-    target_failures, success_guard = _build_verification_sample(
-        failures, successes, inst_map,
-        sample_size=sample_size,
-        min_sample=min_sample,
-        seed=seed,
-    )
-    log.info(
-        "Verification sample | size=%d (target_n=%d baseline-failures, guard_n=%d baseline-successes) | drawn uniformly from %d instances",
-        len(target_failures) + len(success_guard),
-        len(target_failures), len(success_guard), len(inst_map),
-    )
+        if sample_size_cfg is not None:
+            sample_size = int(sample_size_cfg)
+        else:
+            holdout_ratio = float(ver_cfg.get("holdout_ratio", 0.3))
+            sample_size = max(min_sample, int(len(inst_map) * holdout_ratio))
 
-    baseline_cache = _build_baseline_cache(
-        target_failures, success_guard, failures, successes,
-    )
+        target_failures, success_guard = _build_verification_sample(
+            failures, successes, inst_map,
+            sample_size=sample_size,
+            min_sample=min_sample,
+            seed=seed,
+        )
+        log.info(
+            "Verification sample | size=%d (target_n=%d baseline-failures, guard_n=%d baseline-successes) | drawn uniformly from %d instances",
+            len(target_failures) + len(success_guard),
+            len(target_failures), len(success_guard), len(inst_map),
+        )
+
+        baseline_cache = _build_baseline_cache(
+            target_failures, success_guard, failures, successes,
+        )
 
     verification_dir = ensure_dir(run_dir / "verification")
     candidate_dir = gen_cfg.get("candidate_output_dir", str(run_dir / "candidates"))

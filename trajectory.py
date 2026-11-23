@@ -89,6 +89,13 @@ def evaluate_trajectory(
     bench = instance.metadata.get("benchmark")
     model_output = str(traj.final_output or "")
 
+    if bench == "searchqa":
+        from benchmarks.searchqa import score_response
+        result = score_response(model_output, instance.ground_truth)
+        result.update(passed=bool(result["em"]), score=result["em"],
+                      error_message="Answer did not match any reference after normalization.")
+        return _apply_grader_result(traj, result, "searchqa_eval")
+
     if bench == "tau_bench":
         return traj
 
@@ -589,6 +596,9 @@ def run_agent(instance: TaskInstance, skill_bundle: SkillItem | None = None,
 
     has_tools = bool(tools)
     system_prompt = AGENT_SYSTEM_WITH_TOOLS if has_tools else AGENT_SYSTEM
+    if instance.metadata.get("benchmark") == "searchqa":
+        system_prompt += ("\nAnswer from the given passages. Put only a concise answer "
+                          "inside <answer>...</answer> tags.")
 
     prompt = AGENT_PROMPT.format(
         skill_section=skill_section,
@@ -837,9 +847,13 @@ def collect_trajectories(
         for inst in instances
         for _ in range(runs_per_instance)
     ]
-    return llm.run_concurrent(
+    trajectories = llm.run_concurrent(
         _run_and_eval,
         args_list,
         max_workers=max_workers,
         progress_desc=progress_desc,
     )
+    if instances and instances[0].metadata.get("benchmark") == "searchqa":
+        if all(t.metadata.get("agent_exception") for t in trajectories):
+            raise RuntimeError(f"Every SearchQA rollout failed: {trajectories[0].error_summary}")
+    return trajectories
