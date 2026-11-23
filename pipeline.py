@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import yaml
 from dataclasses import asdict
@@ -38,7 +39,17 @@ log = logging.getLogger("skillgen.pipeline")
 
 def load_config(path: str = "config.yaml") -> dict:
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    model = os.environ.get("OPENAI_COMPATIBLE_MODEL")
+    if model:
+        models = cfg.setdefault("models", {})
+        models["default"] = model
+        cfg["models"] = dict.fromkeys(models, model)
+        if cfg.get("router"):
+            cfg["router"]["model"] = model
+    if os.environ.get("EMBEDDING_MODEL"):
+        cfg.setdefault("embedding", {})["model"] = os.environ["EMBEDDING_MODEL"]
+    return cfg
 
 
 def _progress_iter(items, *, desc: str):
@@ -191,6 +202,12 @@ def run_pipeline(
                 "models": model_cfg,
                 "llm": llm_cfg,
                 "pipeline": pipe_cfg,
+                "request_overrides": {
+                    name: os.environ[name] for name in (
+                        "TARGET_OPENAI_COMPATIBLE_MAX_TOKENS", "OPTIMIZER_OPENAI_COMPATIBLE_MAX_TOKENS",
+                        "SKILLOPT_WORKERS", "EMBEDDING_MODEL",
+                    ) if os.environ.get(name)
+                },
                 "skill_output_path": str(skill_output_path),
             },
         )

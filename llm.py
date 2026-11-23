@@ -99,6 +99,7 @@ except ImportError:  # pragma: no cover - optional dependency fallback
 
 _router_client: OpenAI | None = None
 _openai_client: OpenAI | None = None
+_embedding_client: OpenAI | None = None
 _ROUTER_MAX_RETRIES = 6
 _ROUTER_RETRY_BASE_DELAY = 2.0
 # Per-request HTTP timeout for OpenRouter. Without this the OpenAI SDK's
@@ -110,12 +111,14 @@ _ROUTER_REQUEST_TIMEOUT = float(os.environ.get("OPENROUTER_HTTP_TIMEOUT", "180")
 
 
 def _get_router_client() -> OpenAI:
-    """OpenRouter client for LLM chat completions."""
+    """Use the configured chat gateway, falling back to the native OpenRouter setup."""
     global _router_client
     if _router_client is None:
+        base_url = os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+        key_name = "OPENAI_COMPATIBLE_API_KEY" if base_url else "OPENROUTER_API_KEY"
         _router_client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ["OPENROUTER_API_KEY"],
+            base_url=base_url or "https://openrouter.ai/api/v1",
+            api_key=os.environ[key_name],
             timeout=_ROUTER_REQUEST_TIMEOUT,
         )
     return _router_client
@@ -129,6 +132,36 @@ def _get_openai_client() -> OpenAI:
             api_key=os.environ.get("OPENAI_API_KEY", ""),
         )
     return _openai_client
+
+
+def _get_embedding_client() -> OpenAI:
+    base_url = os.environ.get("EMBEDDING_BASE_URL")
+    if not base_url:
+        return _get_openai_client()
+    global _embedding_client
+    if _embedding_client is None:
+        _embedding_client = OpenAI(
+            base_url=base_url.rstrip("/").removesuffix("/embeddings"),
+            api_key=os.environ["EMBEDDING_API_KEY"],
+        )
+    return _embedding_client
+
+
+def positive_env_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    number = int(value)
+    if number < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return number
+
+
+def _completion_budget(role: str, requested: int | None) -> int:
+    cap = positive_env_int(f"{role}_OPENAI_COMPATIBLE_MAX_TOKENS")
+    if requested is None:
+        return cap or 4096
+    return min(requested, cap) if cap is not None else requested
 
 
 def _router_chat_create(**kwargs):
@@ -171,13 +204,13 @@ def _router_chat_create(**kwargs):
 def chat(prompt: str, *, system: str = "", model: str = "openai/gpt-5.4-mini",
          temperature: float = 0.0, max_tokens: int = 4096,
          tools: list[dict] | None = None) -> str | dict:
-    """Single-turn chat completion via OpenRouter."""
+    """Single-turn optimizer chat completion."""
     msgs = []
     if system:
         msgs.append({"role": "system", "content": system})
     msgs.append({"role": "user", "content": prompt})
     kwargs = dict(model=model, messages=msgs,
-                  temperature=temperature, max_tokens=max_tokens)
+                  temperature=temperature, max_tokens=_completion_budget("OPTIMIZER", max_tokens))
     if tools:
         kwargs["tools"] = tools
     resp = _router_chat_create(**kwargs)
@@ -244,13 +277,13 @@ def _repair_json(raw: str) -> dict:
 
 def chat_json(prompt: str, *, system: str = "", model: str = "openai/gpt-5.4-mini",
               temperature: float = 0.0, max_tokens: int = 4096) -> dict:
-    """Chat completion that parses the response as JSON, via OpenRouter.
+    """Optimizer chat completion that parses the response as JSON.
 
     Automatically retries with doubled max_tokens if the response is truncated
-    (JSONDecodeError due to unterminated string), up to _JSON_MAX_TOKENS_CAP.
+    (JSONDecodeError due to unterminated string), within the native retry budget.
     """
-    _JSON_MAX_TOKENS_CAP = 32768
-    current_max = max_tokens
+    retry_cap = _completion_budget("OPTIMIZER", 32768)
+    current_max = _completion_budget("OPTIMIZER", max_tokens)
     msgs = []
     if system:
         msgs.append({"role": "system", "content": system})
@@ -272,8 +305,8 @@ def chat_json(prompt: str, *, system: str = "", model: str = "openai/gpt-5.4-min
         except json.JSONDecodeError as exc:
             last_exc = exc
             # If the model was cut off mid-response, retry with more tokens
-            if finish_reason == "length" and current_max < _JSON_MAX_TOKENS_CAP:
-                current_max = min(current_max * 2, _JSON_MAX_TOKENS_CAP)
+            if finish_reason == "length" and current_max < retry_cap:
+                current_max = min(current_max * 2, retry_cap)
                 continue
             # Otherwise try to repair the JSON in-place
             try:
@@ -283,11 +316,11 @@ def chat_json(prompt: str, *, system: str = "", model: str = "openai/gpt-5.4-min
 
 
 def chat_multi_turn(messages: list[dict], *, model: str = "openai/gpt-5.4-mini",
-                    temperature: float = 0.0, max_tokens: int = 4096,
+                    temperature: float = 0.0, max_tokens: int | None = None,
                     tools: list[dict] | None = None):
-    """Multi-turn chat completion via OpenRouter; retries on empty-choices responses."""
+    """Target agent completion, with retries on empty-choices responses."""
     kwargs = dict(model=model, messages=messages,
-                  temperature=temperature, max_tokens=max_tokens)
+                  temperature=temperature, max_tokens=_completion_budget("TARGET", max_tokens))
     if tools:
         kwargs["tools"] = tools
 
@@ -330,7 +363,9 @@ def embed(texts: list[str], *, model: str = "text-embedding-3-small") -> list[li
     results: list[list[float]] = []
     for i in range(0, len(truncated), _EMBED_BATCH_SIZE):
         batch = truncated[i : i + _EMBED_BATCH_SIZE]
-        resp = _get_openai_client().embeddings.create(model=model, input=batch)
+        resp = _get_embedding_client().embeddings.create(
+            model=model, input=batch, encoding_format="float",
+        )
         _record_usage(resp, model=model, call_type="embed")
         results.extend(d.embedding for d in sorted(resp.data, key=lambda x: x.index))
     return results

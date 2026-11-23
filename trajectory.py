@@ -850,7 +850,7 @@ def collect_trajectories(
     trajectories = llm.run_concurrent(
         _run_and_eval,
         args_list,
-        max_workers=max_workers,
+        max_workers=llm.positive_env_int("SKILLOPT_WORKERS") or max_workers,
         progress_desc=progress_desc,
     )
     if instances and instances[0].metadata.get("benchmark") == "searchqa":

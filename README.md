@@ -103,6 +103,16 @@ thresholds follow the supplied configuration. Test reports EM and token F1 on
 all 1,400 fixed items. A rejected skill reuses the no-skill test result.
 Use `--skill-repo <timestamped-skill-directory>` to evaluate a saved run.
 
+To use one OpenAI-compatible chat deployment for all SearchQA roles, export
+`OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY` and
+`OPENAI_COMPATIBLE_MODEL` before invoking the same command. For the comparison
+set `TARGET_OPENAI_COMPATIBLE_MAX_TOKENS=131072` for each answer,
+`OPTIMIZER_OPENAI_COMPATIBLE_MAX_TOKENS=131072` as the ceiling for native
+skill-generation and analysis requests, and `SKILLOPT_WORKERS=24` for train,
+dev and test answer rollouts. For SiliconFlow clustering, set
+`EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1`, `EMBEDDING_API_KEY` and
+`EMBEDDING_MODEL=BAAI/bge-m3`. The full URL ending in `/embeddings` also works.
+
 ## Configuration
 
 All hyperparameters are in `config.yaml`. The most commonly adjusted fields:
