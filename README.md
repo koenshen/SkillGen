@@ -113,6 +113,51 @@ dev and test answer rollouts. For SiliconFlow clustering, set
 `EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1`, `EMBEDDING_API_KEY` and
 `EMBEDDING_MODEL=BAAI/bge-m3`. The full URL ending in `/embeddings` also works.
 
+### Original SearchQA run on the CPU server
+
+The run on 2026-11-24 uses SkillGen code `805bcd7` and its checked-in `config.yaml`. From a Bash shell on `ssh cpu`, supply the two service keys in the environment. If needed, enter them with `read -rs -p 'TokenHub key: ' OPENAI_COMPATIBLE_API_KEY; echo; export OPENAI_COMPATIBLE_API_KEY` and the equivalent command for `EMBEDDING_API_KEY`. The dedicated tmux server inherits the exported credentials when it starts.
+
+```bash
+# CPU tmux launch (20261124-r1)
+(
+  set -eu
+  : "${OPENAI_COMPATIBLE_API_KEY:?export the TokenHub key first}"
+  : "${EMBEDDING_API_KEY:?export the SiliconFlow key first}"
+  session=sq-original-skillgen
+  out="$HOME/searchqa-original-runs/20261124-r1/skillgen"
+  if tmux -L "$session" has-session -t "$session" 2>/dev/null; then
+    echo "Session $session is already running" >&2
+    exit 1
+  fi
+  umask 077
+  mkdir -p "${out%/*}"
+  mkdir "$out"
+  tmux -L "$session" new-session -d -s "$session" -c "$out" bash -o pipefail -c '
+    repo=/mnt/sdd3/xuancheng/code/github/SkillGen
+    export PYTHONPATH="$repo"
+    export OPENAI_COMPATIBLE_BASE_URL=https://tokenhub.sensetime.com/v1
+    export OPENAI_COMPATIBLE_MODEL=deepseek-v4.1-flash-1017/huoshan_L/sfc
+    export TARGET_OPENAI_COMPATIBLE_MAX_TOKENS=131072
+    export OPTIMIZER_OPENAI_COMPATIBLE_MAX_TOKENS=131072
+    export SKILLOPT_WORKERS=24
+    export EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1/embeddings
+    export EMBEDDING_MODEL=BAAI/bge-m3
+    {
+      git -C "$repo" rev-parse HEAD &&
+      "$HOME/miniconda3/envs/rdagent/bin/python" -B -u -m benchmarks.searchqa \
+        --config "$repo/config.yaml" \
+        --split-dir /mnt/sdd3/xuancheng/code/github/SkillOpt/data/searchqa_split \
+        --output "$PWD/test"
+    } 2>&1 | tee console.log
+    status=$?
+    printf "%s\n" "$status" > exit.status
+    exit "$status"
+  '
+)
+```
+
+Attach with `tmux -L sq-original-skillgen attach -t sq-original-skillgen` or follow `console.log` in the run directory. Native training and dev artifacts are under `artifacts/runs/`, candidate skills under `candidates/`, and the retained skill under `skill_output/`. The held-out scores are in `test/summary.json` and test usage is in `test/test_token_usage.json`. `exit.status` is written when the process exits (`0` for success). Use a fresh output directory for a repeat.
+
 ## Configuration
 
 All hyperparameters are in `config.yaml`. The most commonly adjusted fields:
