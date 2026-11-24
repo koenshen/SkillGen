@@ -115,16 +115,16 @@ dev and test answer rollouts. For SiliconFlow clustering, set
 
 ### Original SearchQA run on the CPU server
 
-The run on 2026-11-24 uses SkillGen code `805bcd7` and its checked-in `config.yaml`. From a Bash shell on `ssh cpu`, supply the two service keys in the environment. If needed, enter them with `read -rs -p 'TokenHub key: ' OPENAI_COMPATIBLE_API_KEY; echo; export OPENAI_COMPATIBLE_API_KEY` and the equivalent command for `EMBEDDING_API_KEY`. The dedicated tmux server inherits the exported credentials when it starts.
+The first run (`20261124-r1`, code `805bcd7`) stopped during failure summarization when TokenHub returned HTTP 400 with `Requests rate limit exceeded`. Its launch command is in `git show 68d4d72:README.md`. The fresh run below uses the checked-in `config.yaml` and handles this response with the existing exponential backoff (six attempts total). It recomputes training trajectories, embeddings, skills and evaluations in a new working directory. From a Bash shell on `ssh cpu`, supply the two service keys in the environment. If needed, enter them with `read -rs -p 'TokenHub key: ' OPENAI_COMPATIBLE_API_KEY; echo; export OPENAI_COMPATIBLE_API_KEY` and the equivalent command for `EMBEDDING_API_KEY`. The dedicated tmux server inherits the exported credentials when it starts.
 
 ```bash
-# CPU tmux launch (20261124-r1)
+# CPU tmux launch (20261124-r2)
 (
   set -eu
   : "${OPENAI_COMPATIBLE_API_KEY:?export the TokenHub key first}"
   : "${EMBEDDING_API_KEY:?export the SiliconFlow key first}"
-  session=sq-original-skillgen
-  out="$HOME/searchqa-original-runs/20261124-r1/skillgen"
+  session=sq-original-skillgen-r2
+  out="$HOME/searchqa-original-runs/20261124-r2/skillgen"
   if tmux -L "$session" has-session -t "$session" 2>/dev/null; then
     echo "Session $session is already running" >&2
     exit 1
@@ -156,7 +156,7 @@ The run on 2026-11-24 uses SkillGen code `805bcd7` and its checked-in `config.ya
 )
 ```
 
-Attach with `tmux -L sq-original-skillgen attach -t sq-original-skillgen` or follow `console.log` in the run directory. Native training and dev artifacts are under `artifacts/runs/`, candidate skills under `candidates/`, and the retained skill under `skill_output/`. The held-out scores are in `test/summary.json` and test usage is in `test/test_token_usage.json`. `exit.status` is written when the process exits (`0` for success). Use a fresh output directory for a repeat.
+Attach with `tmux -L sq-original-skillgen-r2 attach -t sq-original-skillgen-r2` or follow `console.log` in the run directory. Native training and dev artifacts are under `artifacts/runs/`, candidate skills under `candidates/`, and the retained skill under `skill_output/`. The held-out scores are in `test/summary.json` and test usage is in `test/test_token_usage.json`. `exit.status` is written when the process exits (`0` for success). Use a fresh output directory for a repeat.
 
 ## Configuration
 

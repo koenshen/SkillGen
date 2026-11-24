@@ -185,6 +185,7 @@ def _router_chat_create(**kwargs):
                 or "RateLimit" in cls_name
                 or "rate-limited" in msg.lower()
                 or "rate limited" in msg.lower()
+                or (getattr(exc, "status_code", None) == 400 and "rate limit exceeded" in msg.lower())
                 or "timeout" in msg.lower()
                 or "timed out" in msg.lower()
                 or "temporarily unavailable" in msg.lower()
