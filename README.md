@@ -158,6 +158,36 @@ The first run (`20261124-r1`, code `805bcd7`) stopped during failure summarizati
 
 Attach with `tmux -L sq-original-skillgen-r2 attach -t sq-original-skillgen-r2` or follow `console.log` in the run directory. Native training and dev artifacts are under `artifacts/runs/`, candidate skills under `candidates/`, and the retained skill under `skill_output/`. The held-out scores are in `test/summary.json` and test usage is in `test/test_token_usage.json`. `exit.status` is written when the process exits (`0` for success). Use a fresh output directory for a repeat.
 
+### Optional ranked dev validation (fixed SearchQA)
+
+The normal SearchQA command evaluates every candidate on the entire dev set.
+To evaluate only one dev batch at a time, add `--dev-early-stop` to
+`python -m benchmarks.searchqa`. The defaults are `--dev-order hard-first`
+and `--dev-batch-size 4`. Use `--dev-order easy-first` to try the opposite
+order. Each question is ranked by mean EM over its observed versions, starting
+with the full no-skill dev pass. Ties use the fixed manifest order.
+
+**Certified acceptance** is a separate opt-in, `--dev-early-accept`. For
+`N` fixed dev questions, let `B` be the baseline correct count and keep the
+native minimum net gain `g = max(1, min_net_gain_abs, ceil(min_net_gain_rel * N))`.
+After a batch with `k` evaluated and `c` correct in total, the candidate's
+final correct count lies in `[c, c + N - k]`. With certified acceptance
+enabled, `c >= B + g` passes the existing first-passing-candidate gate. A
+candidate that cannot pass is still fully evaluated because its cases and
+exact net gain are used for refinement and best-candidate bookkeeping. With
+only `--dev-early-stop`, both passing and failing candidates finish dev.
+Training keeps its native first-pass termination, and both test evaluations cover the full held-out split.
+
+For example, append `--dev-early-stop --dev-order easy-first --dev-batch-size 4 --dev-early-accept` to the fixed SearchQA training command in a new output
+directory. Each round's `verification_summary.json` records the evaluated
+IDs, bounds, batch checkpoints and stopping reason in `dev_evaluation`. A
+partial pass has null full-candidate metrics; the case analyst and revision
+synthesiser still process the observed diagnostic cases. Only measured IDs
+enter the next history update. In the archived r2 run the fixed baseline
+scored 119/200, the candidate 152/200 and the pass threshold was 129. Replaying
+those answers in batches of four certifies the pass after 180 questions with
+hard-first and 144 with easy-first.
+
 ## Configuration
 
 All hyperparameters are in `config.yaml`. The most commonly adjusted fields:

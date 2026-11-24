@@ -14,6 +14,7 @@ from artifacts import (
     ensure_dir, make_run_dir, write_json, write_trajectories,
     save_trajectories, load_trajectories, checkpoint_exists, load_progress, save_progress,
 )
+from benchmarks.searchqa_dev import DevEarlyStop
 from models import (
     SkillAnalysis, SkillStatus, TaskInstance, TaskType, Trajectory,
     VerificationFeedback,
@@ -121,9 +122,12 @@ def run_pipeline(
     generate_scripts: bool | None = None,
     resume_dir: str | None = None,
     verification_instances: list[TaskInstance] | None = None,
+    dev_early_stop: DevEarlyStop | None = None,
 ):
     """End-to-end single-skill discovery pipeline."""
 
+    if dev_early_stop is not None and (dataset_id != "searchqa" or verification_instances is None):
+        raise ValueError("Candidate dev early stopping requires the fixed SearchQA dev split")
     if verification_instances is not None:
         dev_ids = {i.instance_id for i in verification_instances}
         if not dev_ids or len(dev_ids) != len(verification_instances):
@@ -202,6 +206,9 @@ def run_pipeline(
                 "models": model_cfg,
                 "llm": llm_cfg,
                 "pipeline": pipe_cfg,
+                **({"dev_early_stop": {"order": dev_early_stop.order, "batch_size": dev_early_stop.batch_size,
+                                       "early_accept": dev_early_stop.early_accept}}
+                   if dev_early_stop is not None else {}),
                 "request_overrides": {
                     name: os.environ[name] for name in (
                         "TARGET_OPENAI_COMPATIBLE_MAX_TOKENS", "OPTIMIZER_OPENAI_COMPATIBLE_MAX_TOKENS",
@@ -313,6 +320,8 @@ def run_pipeline(
             )
         write_trajectories(run_dir / "dev_baseline.jsonl", dev_trajs)
         baseline_cache = {t.instance_id: t for t in dev_trajs}
+        if dev_early_stop is not None:
+            dev_early_stop.seed(verification_instances, baseline_cache)
         target_failures = [i for i in verification_instances if not baseline_cache[i.instance_id].success]
         success_guard = [i for i in verification_instances if baseline_cache[i.instance_id].success]
         log.info("Fixed dev | %d failures, %d successes", len(target_failures), len(success_guard))
@@ -447,21 +456,29 @@ def run_pipeline(
                 router_max_workers=router_max_workers,
                 min_net_gain_abs=int(ver_cfg.get("min_net_gain_abs", 1)),
                 min_net_gain_rel=float(ver_cfg.get("min_net_gain_rel", 0.0)),
+                dev_early_stop=dev_early_stop,
             )
 
         eff = feedback.effectiveness
         if eff:
-            log.info(
-                "Round %d | paired_n=%d | baseline_acc=%.1f%% | skill_acc=%.1f%% | "
-                "repair=%d | regression=%d | net_gain=%+d | passed=%s",
-                round_idx + 1, eff.paired_n, eff.baseline_acc * 100.0,
-                eff.skill_acc * 100.0, eff.repair_count, eff.regression_count,
-                eff.net_gain, eff.passed,
-            )
-            if eff.net_gain > best_net_gain:
-                best_net_gain = eff.net_gain
+            if eff.dev_evaluation and eff.dev_evaluation["stopped"]:
+                # Same fixed dev and threshold across rounds: every earlier round
+                # failed and this candidate provably clears the threshold.
+                log.info("Round %d | %s", round_idx + 1, eff.diagnostic_summary)
                 best_candidate = candidate
                 best_feedback = feedback
+            else:
+                log.info(
+                    "Round %d | paired_n=%d | baseline_acc=%.1f%% | skill_acc=%.1f%% | "
+                    "repair=%d | regression=%d | net_gain=%+d | passed=%s",
+                    round_idx + 1, eff.paired_n, eff.baseline_acc * 100.0,
+                    eff.skill_acc * 100.0, eff.repair_count, eff.regression_count,
+                    eff.net_gain, eff.passed,
+                )
+                if eff.net_gain > best_net_gain:
+                    best_net_gain = eff.net_gain
+                    best_candidate = candidate
+                    best_feedback = feedback
             if eff.passed:
                 log.info("Skill passes net-gain gate at round %d; stopping refinement.",
                          round_idx + 1)
@@ -504,6 +521,8 @@ def run_pipeline(
             "baseline_acc": final_feedback.effectiveness.baseline_acc,
             "skill_acc": final_feedback.effectiveness.skill_acc,
             "diagnostic": final_feedback.effectiveness.diagnostic_summary,
+            **({"dev_evaluation": final_feedback.effectiveness.dev_evaluation}
+               if final_feedback.effectiveness.dev_evaluation is not None else {}),
             "rejected_no_passing_round": not any_round_passed,
         })
     save_skill(skill, skill_output_path)

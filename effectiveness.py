@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 
+from benchmarks.searchqa_dev import DevEarlyStop
 from artifacts import write_json, write_trajectories
 from models import (
     TaskInstance, TaskType, SkillItem, EffectivenessResult, Trajectory,
@@ -62,6 +64,89 @@ def collect_baseline_cache(
     return {t.instance_id: t for t in trajs}
 
 
+def _collect_candidate_batch(
+    instances: list[TaskInstance], task_type: TaskType, *, skill: SkillItem,
+    skill_config: AgentConfig, baseline_cache: dict[str, Trajectory],
+    router_model: str | None, router_max_workers: int, target_failure_ids: set[str],
+    label: str, check_all_failed: bool,
+) -> list[Trajectory]:
+    # Optional router: decide per-instance whether the skill should be applied.
+    # If the router says "no" for an instance, we skip the skill run for it and
+    # reuse the baseline trajectory as the skill trajectory (no regression
+    # possible for bypassed instances). This mirrors real-world deployment:
+    # a router gates whether the skill prompt is even shown to the agent.
+    router_decisions: dict[str, tuple[bool, str]] = {}
+    route_in_instances: list[TaskInstance] = instances
+    route_out_instances: list[TaskInstance] = []
+    if router_model:
+        router_decisions = route_instances(
+            instances,
+            skill,
+            model=router_model,
+            max_workers=router_max_workers,
+            progress_desc=f"{label} router",
+        )
+        route_in_instances = [
+            inst for inst in instances
+            if router_decisions.get(inst.instance_id, (False, ""))[0]
+        ]
+        route_out_instances = [
+            inst for inst in instances
+            if not router_decisions.get(inst.instance_id, (False, ""))[0]
+        ]
+        n_target_in = sum(
+            1 for inst in route_in_instances
+            if inst.instance_id in target_failure_ids
+        )
+        n_boundary_in = len(route_in_instances) - n_target_in
+        log.info(
+            "Router | model=%s | route_in=%d (target=%d, boundary=%d) | route_out=%d of %d",
+            router_model, len(route_in_instances), n_target_in, n_boundary_in,
+            len(route_out_instances), len(instances),
+        )
+
+    # Only run skill-augmented on route-in instances (always fresh, since skill
+    # changes each round). If the router rejected every instance, we skip the
+    # LLM calls entirely and rely on baseline clones below.
+    skill_trajs: list[Trajectory] = []
+    if route_in_instances:
+        skill_trajs = collect_trajectories(
+            route_in_instances,
+            task_type,
+            skill=skill,
+            config=skill_config,
+            progress_desc=f"{label} with skill",
+            check_all_failed=check_all_failed,
+        )
+
+    # For route-out instances, clone the baseline trajectory so downstream
+    # paired statistics see (baseline_result == skill_result) - neither repair
+    # nor regression - and tag metadata with the routing decision for audit.
+    for inst in route_out_instances:
+        base_traj = baseline_cache.get(inst.instance_id)
+        if base_traj is None:
+            continue
+        clone = copy.copy(base_traj)
+        clone.metadata = dict(base_traj.metadata or {})
+        apply_decision, reason = router_decisions.get(inst.instance_id, (False, ""))
+        clone.metadata["router"] = {
+            "applied": False,
+            "reason": reason,
+            "model": router_model,
+            "skill_id": skill.skill_id,
+        }
+        clone.agent_config = dict(base_traj.agent_config or {})
+        clone.agent_config["skill_id"] = skill.skill_id
+        clone.agent_config["skill_bypassed_by_router"] = True
+        skill_trajs.append(clone)
+
+    return skill_trajs
+
+
+def _required_gain(n: int, absolute_floor: int, relative_floor: float) -> int:
+    return max(1, int(absolute_floor), math.ceil(float(relative_floor) * n))
+
+
 def verify_effectiveness(
     skill: SkillItem,
     target_failure_instances: list[TaskInstance],
@@ -81,6 +166,7 @@ def verify_effectiveness(
     router_max_workers: int = 16,
     min_net_gain_abs: int = 1,
     min_net_gain_rel: float = 0.0,
+    dev_early_stop: DevEarlyStop | None = None,
 ) -> tuple[EffectivenessResult, dict[str, Trajectory]]:
     """
     Protocol A unified effectiveness check.
@@ -104,6 +190,12 @@ def verify_effectiveness(
     )
     all_instances = target_failure_instances + boundary_success_instances
 
+    if dev_early_stop is not None:
+        baseline_scores = {i: bool(t.success) for i, t in (baseline_cache or {}).items()}
+        seeded_scores = {i: scores[0] for i, scores in dev_early_stop.history.items()}
+        if not baseline_scores or baseline_scores != seeded_scores:
+            raise ValueError("Ranked verification requires its complete fixed dev baseline")
+
     # Reuse or build baseline cache
     if baseline_cache is None:
         baseline_cache = collect_baseline_cache(
@@ -124,77 +216,24 @@ def verify_effectiveness(
             for t in extra:
                 baseline_cache[t.instance_id] = t
 
-    # Optional router: decide per-instance whether the skill should be applied.
-    # If the router says "no" for an instance, we skip the skill run for it and
-    # reuse the baseline trajectory as the skill trajectory (no regression
-    # possible for bypassed instances). This mirrors real-world deployment:
-    # a router gates whether the skill prompt is even shown to the agent.
-    router_decisions: dict[str, tuple[bool, str]] = {}
-    route_in_instances: list[TaskInstance] = all_instances
-    route_out_instances: list[TaskInstance] = []
-    if router_model:
-        router_decisions = route_instances(
-            all_instances,
-            skill,
-            model=router_model,
-            max_workers=router_max_workers,
-            progress_desc=f"{progress_label or artifact_prefix} router",
-        )
-        route_in_instances = [
-            inst for inst in all_instances
-            if router_decisions.get(inst.instance_id, (False, ""))[0]
-        ]
-        route_out_instances = [
-            inst for inst in all_instances
-            if not router_decisions.get(inst.instance_id, (False, ""))[0]
-        ]
-        target_failure_ids_for_log = {inst.instance_id for inst in target_failure_instances}
-        n_target_in = sum(
-            1 for inst in route_in_instances
-            if inst.instance_id in target_failure_ids_for_log
-        )
-        n_boundary_in = len(route_in_instances) - n_target_in
-        log.info(
-            "Router | model=%s | route_in=%d (target=%d, boundary=%d) | route_out=%d of %d",
-            router_model, len(route_in_instances), n_target_in, n_boundary_in,
-            len(route_out_instances), len(all_instances),
+    label = progress_label or artifact_prefix
+    target_failure_ids = {i.instance_id for i in target_failure_instances}
+
+    def run_batch(batch):
+        return _collect_candidate_batch(
+            batch, task_type, skill=skill, skill_config=skill_config,
+            baseline_cache=baseline_cache, router_model=router_model,
+            router_max_workers=router_max_workers, target_failure_ids=target_failure_ids,
+            label=label, check_all_failed=dev_early_stop is None,
         )
 
-    # Only run skill-augmented on route-in instances (always fresh, since skill
-    # changes each round). If the router rejected every instance, we skip the
-    # LLM calls entirely and rely on baseline clones below.
-    skill_map: dict[str, Trajectory] = {}
-    skill_trajs: list[Trajectory] = []
-    if route_in_instances:
-        skill_trajs = collect_trajectories(
-            route_in_instances,
-            task_type,
-            skill=skill,
-            config=skill_config,
-            progress_desc=f"{progress_label or artifact_prefix} with skill",
-        )
-        skill_map = {t.instance_id: t for t in skill_trajs}
-
-    # For route-out instances, clone the baseline trajectory so downstream
-    # paired statistics see (baseline_result == skill_result) - neither repair
-    # nor regression - and tag metadata with the routing decision for audit.
-    for inst in route_out_instances:
-        base_traj = baseline_cache.get(inst.instance_id)
-        if base_traj is None:
-            continue
-        clone = copy.copy(base_traj)
-        clone.metadata = dict(base_traj.metadata or {})
-        apply_decision, reason = router_decisions.get(inst.instance_id, (False, ""))
-        clone.metadata["router"] = {
-            "applied": False,
-            "reason": reason,
-            "model": router_model,
-            "skill_id": skill.skill_id,
-        }
-        clone.agent_config = dict(base_traj.agent_config or {})
-        clone.agent_config["skill_id"] = skill.skill_id
-        clone.agent_config["skill_bypassed_by_router"] = True
-        skill_map[inst.instance_id] = clone
+    dev_report = None
+    if dev_early_stop is None:
+        measured = run_batch(all_instances)
+    else:
+        gain_needed = _required_gain(len(all_instances), min_net_gain_abs, min_net_gain_rel)
+        measured, dev_report = dev_early_stop.evaluate(all_instances, gain_needed, run_batch)
+    skill_map = {t.instance_id: t for t in measured}
 
     # Build paired outcomes
     repair, regression = 0, 0
@@ -205,7 +244,6 @@ def verify_effectiveness(
     paired_count = 0
     baseline_success_total = 0
     skill_success_total = 0
-    target_failure_ids = {inst.instance_id for inst in target_failure_instances}
     per_instance_records: list[dict] = []
     target_repair_count = 0
     target_fail_count = 0
@@ -280,26 +318,29 @@ def verify_effectiveness(
     # proportional (sample-size-scaled) floor. Requiring both guards against
     # tiny-sample flukes - a +1 net_gain on n=60 is noise, but +6 on n=120 is
     # meaningful signal.
-    import math
-    required_net_gain = max(
-        int(min_net_gain_abs),
-        int(math.ceil(float(min_net_gain_rel) * paired_count)),
-    )
-    # Guarantee that the gate is at least strictly positive so the name still
-    # matches intuition even when both knobs are set to 0.
-    required_net_gain = max(required_net_gain, 1)
-    passed = net_gain >= required_net_gain
-    diagnostic = (
-        "mode=net_gain_gated, "
-        f"paired_n={paired_count}, "
-        f"n_target={len(target_failure_instances)}, n_success_guard={len(boundary_success_instances)}, "
-        f"baseline_acc={baseline_acc:.1%}, skill_acc={skill_acc:.1%}, "
-        f"repair={repair}/{baseline_fail_count} ({repair_rate:.1%}), "
-        f"regression={regression}/{baseline_pass_count} ({regression_rate:.1%}), "
-        f"net_gain={net_gain}, "
-        f"required={required_net_gain} (abs={int(min_net_gain_abs)}, rel={float(min_net_gain_rel):.2f}*n), "
-        f"passed={passed}"
-    )
+    partial = dev_report is not None and dev_report["stopped"]
+    if partial:
+        passed = True  # DevEarlyStop certifies the gate against the full fixed split.
+        baseline_acc = dev_report["baseline_correct"] / dev_report["n_total"]
+        diagnostic = (
+            f"certified pass; evaluated {paired_count}/{dev_report['n_total']}; "
+            f"full-dev correct count in [{dev_report['correct_lower']}, {dev_report['correct_upper']}], "
+            f"required={dev_report['required_correct']}. Cases below cover observed pairs only."
+        )
+    else:
+        required_net_gain = _required_gain(paired_count, min_net_gain_abs, min_net_gain_rel)
+        passed = net_gain >= required_net_gain
+        diagnostic = (
+            "mode=net_gain_gated, "
+            f"paired_n={paired_count}, "
+            f"n_target={len(target_failure_instances)}, n_success_guard={len(boundary_success_instances)}, "
+            f"baseline_acc={baseline_acc:.1%}, skill_acc={skill_acc:.1%}, "
+            f"repair={repair}/{baseline_fail_count} ({repair_rate:.1%}), "
+            f"regression={regression}/{baseline_pass_count} ({regression_rate:.1%}), "
+            f"net_gain={net_gain}, "
+            f"required={required_net_gain} (abs={int(min_net_gain_abs)}, rel={float(min_net_gain_rel):.2f}*n), "
+            f"passed={passed}"
+        )
 
     eff = EffectivenessResult(
         passed=passed,
@@ -307,21 +348,22 @@ def verify_effectiveness(
         n_boundary=len(boundary_success_instances),
         paired_n=paired_count,
         baseline_acc=baseline_acc,
-        skill_acc=skill_acc,
-        repair_count=repair,
-        regression_count=regression,
-        repair_rate=repair_rate,
-        regression_rate=regression_rate,
-        net_gain=net_gain,
-        target_repair_count=target_repair_count,
-        target_fail_count=target_fail_count,
-        success_guard_regression_count=success_guard_regression_count,
-        success_guard_pass_count=success_guard_pass_count,
+        skill_acc=None if partial else skill_acc,
+        repair_count=None if partial else repair,
+        regression_count=None if partial else regression,
+        repair_rate=None if partial else repair_rate,
+        regression_rate=None if partial else regression_rate,
+        net_gain=None if partial else net_gain,
+        target_repair_count=None if partial else target_repair_count,
+        target_fail_count=None if partial else target_fail_count,
+        success_guard_regression_count=None if partial else success_guard_regression_count,
+        success_guard_pass_count=None if partial else success_guard_pass_count,
         repaired_ids=repaired_ids,
         regression_ids=regression_ids,
         failed_ids_after_skill=failed_ids_after_skill,
         cases=cases,
         diagnostic_summary=diagnostic,
+        dev_evaluation=dev_report,
     )
     if artifact_dir:
         baseline_trajs = [baseline_cache[i.instance_id] for i in all_instances if i.instance_id in baseline_cache]
@@ -368,6 +410,7 @@ def verify_effectiveness(
                     "diagnostic_summary": eff.diagnostic_summary,
                 },
                 "per_instance": per_instance_records,
+                **({"dev_evaluation": dev_report} if dev_report is not None else {}),
             },
         )
     return eff, baseline_cache

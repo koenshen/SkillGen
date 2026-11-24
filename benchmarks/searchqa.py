@@ -114,8 +114,19 @@ def main():
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--skill-repo", help="Test an existing SkillGen output directory (skip training)")
     parser.add_argument("--output", type=Path, help="New directory for held-out test results")
+    parser.add_argument("--dev-early-stop", action="store_true", help="Evaluate candidate dev in ranked batches")
+    parser.add_argument("--dev-order", choices=("hard-first", "easy-first"), default="hard-first")
+    parser.add_argument("--dev-batch-size", type=int, default=4)
+    parser.add_argument("--dev-early-accept", action="store_true",
+                        help="Allow a certified pass to skip remaining candidate dev items")
     parser.add_argument("--check", action="store_true", help="Validate fixed data only, with no model calls")
     args = parser.parse_args()
+    if args.dev_batch_size < 1:
+        parser.error("--dev-batch-size must be positive")
+    if args.dev_early_accept and not args.dev_early_stop:
+        parser.error("--dev-early-accept requires --dev-early-stop")
+    if args.skill_repo and args.dev_early_stop:
+        parser.error("--skill-repo skips training and has no candidate dev to evaluate")
     splits = load_splits(args.split_dir)
     if args.check:
         print("SearchQA:", {split: len(rows) for split, rows in splits.items()})
@@ -135,10 +146,13 @@ def main():
     if args.skill_repo:
         skill = load_skill(args.skill_repo)
     else:
+        from benchmarks.searchqa_dev import DevEarlyStop
+        dev = DevEarlyStop(args.dev_order, args.dev_batch_size, args.dev_early_accept) if args.dev_early_stop else None
         skill = run_pipeline(
             instances(splits["train"]), TaskType.BINARY,
             verification_instances=instances(splits["val"]),
             config_path=args.config, dataset_id="searchqa", task_name="SearchQA",
+            dev_early_stop=dev,
         )
 
     model_cfg = cfg["models"]

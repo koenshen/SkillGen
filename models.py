@@ -167,16 +167,16 @@ class EffectivenessResult:
     n_boundary: int
     paired_n: int
     baseline_acc: float
-    skill_acc: float
-    repair_count: int
-    regression_count: int
-    repair_rate: float
-    regression_rate: float
-    net_gain: int
-    target_repair_count: int
-    target_fail_count: int
-    success_guard_regression_count: int
-    success_guard_pass_count: int
+    skill_acc: float | None
+    repair_count: int | None
+    regression_count: int | None
+    repair_rate: float | None
+    regression_rate: float | None
+    net_gain: int | None
+    target_repair_count: int | None
+    target_fail_count: int | None
+    success_guard_regression_count: int | None
+    success_guard_pass_count: int | None
     repaired_ids: list[str]
     regression_ids: list[str]
     failed_ids_after_skill: list[str]
@@ -185,6 +185,8 @@ class EffectivenessResult:
     # still_failing), with full (un-truncated) task / ground_truth / baseline
     # and skill outputs. Used by the verification agent's per-case analysis.
     cases: list[dict] = field(default_factory=list)
+    # Only present when the fixed SearchQA candidate verifier was requested.
+    dev_evaluation: dict | None = None
 
 
 @dataclass

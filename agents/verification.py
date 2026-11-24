@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from artifacts import write_json
+from benchmarks.searchqa_dev import DevEarlyStop
 from models import (
     CandidateSkill,
     CaseAnalysis,
@@ -204,6 +205,7 @@ def run_verification(
     router_max_workers: int = 16,
     min_net_gain_abs: int = 1,
     min_net_gain_rel: float = 0.0,
+    dev_early_stop: DevEarlyStop | None = None,
 ) -> tuple[VerificationFeedback, dict[str, Trajectory]]:
     """Run effectiveness check -> per-case analysis -> revision synthesis."""
 
@@ -225,6 +227,7 @@ def run_verification(
         router_max_workers=router_max_workers,
         min_net_gain_abs=min_net_gain_abs,
         min_net_gain_rel=min_net_gain_rel,
+        dev_early_stop=dev_early_stop,
     )
 
     feedback = VerificationFeedback(effectiveness=effectiveness, round_idx=round_idx)

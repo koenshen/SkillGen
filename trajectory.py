@@ -828,6 +828,11 @@ def _run_and_eval(instance: TaskInstance, task_type: TaskType,
         return traj
 
 
+def check_searchqa_rollouts(trajectories: list[Trajectory]) -> None:
+    if trajectories and all(t.metadata.get("agent_exception") for t in trajectories):
+        raise RuntimeError(f"Every SearchQA rollout failed: {trajectories[0].error_summary}")
+
+
 def collect_trajectories(
     instances: list[TaskInstance],
     task_type: TaskType,
@@ -838,6 +843,7 @@ def collect_trajectories(
     runs_per_instance: int = 1,
     max_workers: int = 16,
     progress_desc: str | None = None,
+    check_all_failed: bool = True,
 ) -> list[Trajectory]:
     """Run agent on all instances concurrently and evaluate each trajectory."""
     if config is None:
@@ -853,7 +859,6 @@ def collect_trajectories(
         max_workers=llm.positive_env_int("SKILLOPT_WORKERS") or max_workers,
         progress_desc=progress_desc,
     )
-    if instances and instances[0].metadata.get("benchmark") == "searchqa":
-        if all(t.metadata.get("agent_exception") for t in trajectories):
-            raise RuntimeError(f"Every SearchQA rollout failed: {trajectories[0].error_summary}")
+    if check_all_failed and instances and instances[0].metadata.get("benchmark") == "searchqa":
+        check_searchqa_rollouts(trajectories)
     return trajectories
