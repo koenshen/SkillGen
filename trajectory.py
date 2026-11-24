@@ -89,12 +89,19 @@ def evaluate_trajectory(
     bench = instance.metadata.get("benchmark")
     model_output = str(traj.final_output or "")
 
-    if bench == "searchqa":
+    if bench in ("searchqa", "triviaqa", "hotpotqa"):
         from benchmarks.searchqa import score_response
         result = score_response(model_output, instance.ground_truth)
         result.update(passed=bool(result["em"]), score=result["em"],
                       error_message="Answer did not match any reference after normalization.")
-        return _apply_grader_result(traj, result, "searchqa_eval")
+        return _apply_grader_result(traj, result, f"{bench}_eval")
+
+    if bench == "bird":
+        from benchmarks.bird import score_response
+        result = score_response(model_output, instance.ground_truth, instance.metadata["db_path"])
+        result.update(passed=bool(result["ex"]), score=float(result["ex"]),
+                      hard=result["ex"], soft=float(result["ex"]))
+        return _apply_grader_result(traj, result, "bird_eval")
 
     if bench == "tau_bench":
         return traj
@@ -596,9 +603,11 @@ def run_agent(instance: TaskInstance, skill_bundle: SkillItem | None = None,
 
     has_tools = bool(tools)
     system_prompt = AGENT_SYSTEM_WITH_TOOLS if has_tools else AGENT_SYSTEM
-    if instance.metadata.get("benchmark") == "searchqa":
+    if instance.metadata.get("benchmark") in ("searchqa", "triviaqa", "hotpotqa"):
         system_prompt += ("\nAnswer from the given passages. Put only a concise answer "
                           "inside <answer>...</answer> tags.")
+    elif instance.metadata.get("benchmark") == "bird":
+        system_prompt += "\nReturn a single SQLite query that answers the supplied question."
 
     prompt = AGENT_PROMPT.format(
         skill_section=skill_section,
@@ -828,9 +837,9 @@ def _run_and_eval(instance: TaskInstance, task_type: TaskType,
         return traj
 
 
-def check_searchqa_rollouts(trajectories: list[Trajectory]) -> None:
+def check_searchqa_rollouts(trajectories: list[Trajectory], benchmark: str = "SearchQA") -> None:
     if trajectories and all(t.metadata.get("agent_exception") for t in trajectories):
-        raise RuntimeError(f"Every SearchQA rollout failed: {trajectories[0].error_summary}")
+        raise RuntimeError(f"Every {benchmark} rollout failed: {trajectories[0].error_summary}")
 
 
 def collect_trajectories(
@@ -859,6 +868,8 @@ def collect_trajectories(
         max_workers=llm.positive_env_int("SKILLOPT_WORKERS") or max_workers,
         progress_desc=progress_desc,
     )
-    if check_all_failed and instances and instances[0].metadata.get("benchmark") == "searchqa":
-        check_searchqa_rollouts(trajectories)
+    if check_all_failed and instances:
+        bench = instances[0].metadata.get("benchmark")
+        if bench in ("searchqa", "triviaqa", "hotpotqa", "bird"):
+            check_searchqa_rollouts(trajectories, "SearchQA" if bench == "searchqa" else bench)
     return trajectories

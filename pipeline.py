@@ -123,6 +123,7 @@ def run_pipeline(
     resume_dir: str | None = None,
     verification_instances: list[TaskInstance] | None = None,
     dev_early_stop: DevEarlyStop | None = None,
+    output_root: Path | None = None,
 ):
     """End-to-end single-skill discovery pipeline."""
 
@@ -144,6 +145,9 @@ def run_pipeline(
     ver_cfg = cfg.get("verification", {})
     ver_analysis_cfg = cfg.get("verification_analysis", {}) or {}
     pipe_cfg = cfg["pipeline"]
+    if output_root is not None:
+        pipe_cfg = {**pipe_cfg, "artifact_root": str(output_root / "artifacts" / "runs")}
+        gen_cfg = {**gen_cfg, "candidate_output_dir": str(output_root / "candidates")}
     router_cfg = cfg.get("router", {}) or {}
     router_enabled = bool(router_cfg.get("enabled", False))
     router_model_name = router_cfg.get("model") if router_enabled else None
@@ -179,6 +183,8 @@ def run_pipeline(
     skill_output_base = cfg.get("skill_output", {}).get(
         "path", cfg.get("skill_repo", {}).get("path", "./skill_output")
     )
+    if output_root is not None:
+        skill_output_base = output_root / "skill_output"
     skill_output_path = Path(skill_output_base) / run_timestamp
     skill_output_path.mkdir(parents=True, exist_ok=True)
 

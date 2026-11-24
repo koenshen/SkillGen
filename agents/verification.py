@@ -70,12 +70,16 @@ def _analyse_one_case(
 ) -> CaseAnalysis:
     """Run the case-analyst LLM on a single case and return a CaseAnalysis."""
     bucket = _case_outcome_to_bucket(case.get("outcome") or "")
+    task_input = case.get("task_input") or ""
+    if "skill_execution" in case:
+        task_input += (f"\n\nSQLite grading of the baseline: {case['baseline_execution']}."
+                       f"\nSQLite grading of the candidate: {case['skill_execution']}.")
     try:
         result = llm.chat_json(
             CASE_ANALYSIS_PROMPT.format(
                 bucket_label=_BUCKET_LABEL.get(bucket, bucket.upper()),
                 instance_id=case.get("instance_id", "?"),
-                task_input=case.get("task_input") or "",
+                task_input=task_input,
                 ground_truth=case.get("ground_truth") or "",
                 baseline_success=case.get("baseline_success"),
                 baseline_score=float(case.get("baseline_score") or 0.0),

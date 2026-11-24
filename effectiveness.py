@@ -32,7 +32,7 @@ def _build_case_example(
     do not apply any length limit here - the refinement step no longer sees
     these cases directly, it only sees the distilled analyses.
     """
-    return {
+    case = {
         "instance_id": inst.instance_id,
         "bucket": bucket,
         "outcome": outcome,
@@ -45,6 +45,12 @@ def _build_case_example(
         "baseline_score": float(getattr(baseline_traj, "score", 0.0) or 0.0),
         "skill_score": float(getattr(skill_traj, "score", 0.0) or 0.0),
     }
+    if inst.metadata.get("benchmark") == "bird":
+        # This is post-answer feedback for the verifier. It never enters a target request.
+        for label, traj in (("baseline", baseline_traj), ("skill", skill_traj)):
+            grade = traj.metadata.get("bird_eval") or {}
+            case[f"{label}_execution"] = grade.get("error_message") or grade.get("exec_status") or traj.error_summary
+    return case
 
 
 def collect_baseline_cache(

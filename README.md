@@ -188,6 +188,36 @@ scored 119/200, the candidate 152/200 and the pass threshold was 129. Replaying
 those answers in batches of four certifies the pass after 180 questions with
 hard-first and 144 with easy-first.
 
+## Fixed TriviaQA, HotpotQA and BIRD
+
+Select a task with `--benchmark` on the native fixed-split runner. SearchQA remains the default. All four tasks use SkillGen's own agent, induction, generation, paired verification and held-out evaluation. The additional tasks currently use the original full verification workflow. Configure the same chat and embedding environment as in the fixed SearchQA run above.
+
+| Benchmark | Train / dev / test | Grade |
+|---|---|---|
+| `triviaqa` | 1,600 / 200 / 1,000 | Multi-reference EM and token F1 on the supplied evidence |
+| `hotpotqa` | 1,600 / 200 / 1,000 | Answer EM and token F1 on the supplied passages |
+| `bird` | 834 / 200 / 500 | SQLite execution accuracy (EX), including the fixed mini-dev test |
+
+The loader reads the existing `../SkillOpt/data/<benchmark>_split` relative to this checkout and checks the exact ordered IDs of each split. Use `--split-dir` or `TRIVIAQA_SPLIT_DIR`, `HOTPOTQA_SPLIT_DIR` or `BIRD_SPLIT_DIR` to override the data directory. Only the dataset and SQLite files are shared with the reference. For BIRD, the task input is the complete materialized `prompt`; the reference SQL and database path reach the grader separately. The grader extracts the first SQL statement, opens the database read-only, executes the prediction and reference with one 30-second deadline and compares sets of full result rows. SQL errors and timeouts receive EX 0 in train, dev and test. Use `--db-root` or `BIRD_DB_ROOT` to change the default `/mnt/sdd3/xuancheng/code/github/bird-text-to-sql-260820/data_dev/dev_databases`.
+
+From the SkillGen checkout on the CPU server, validate locally available data without model calls:
+
+```bash
+for bench in triviaqa hotpotqa bird; do
+  "$HOME/miniconda3/envs/rdagent/bin/python" -B -m benchmarks.searchqa --benchmark "$bench" --check || exit 1
+done
+```
+
+For a full run, choose a new output directory for each task and repetition. For example, with the existing provider variables exported:
+
+```bash
+bench=bird
+"$HOME/miniconda3/envs/rdagent/bin/python" -B -u -m benchmarks.searchqa --benchmark "$bench" \
+  --config config.yaml --output "$HOME/fixed-benchmark-runs/$bench/skillgen-run1"
+```
+
+For the three new tasks, this directory contains training artifacts under `artifacts/runs/`, candidate and promoted skills under `candidates/` and `skill_output/`, and the held-out `baseline.jsonl`, `skill.jsonl` (when a skill is deployed), `summary.json` and `test_token_usage.json`. The BIRD summary includes `ex`, `agent_errors`, `sql_errors` and `sql_timeouts`; all test rows remain in the denominator.
+
 ## Configuration
 
 All hyperparameters are in `config.yaml`. The most commonly adjusted fields:

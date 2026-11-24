@@ -1,4 +1,4 @@
-"""Run native SkillGen with the fixed SkillOpt SearchQA train, dev and test sets."""
+"""Run native SkillGen on the fixed SearchQA, TriviaQA, HotpotQA or BIRD splits."""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +11,7 @@ import re
 import string
 
 from models import SkillStatus, TaskInstance, TaskType
+from benchmarks.bird import DEFAULT_DB_ROOT, database_path
 
 # SHA-256 of newline-joined item IDs, in the order used in the fixed run.
 SPLIT_SPEC = {
@@ -20,22 +21,45 @@ SPLIT_SPEC = {
 }
 
 
-def load_splits(split_dir=None):
-    default_data = Path(__file__).resolve().parents[2] / "SkillOpt/data/searchqa_split"
-    data = Path(split_dir or os.environ.get("SEARCHQA_SPLIT_DIR") or default_data)
+BENCHMARK_NAMES = {"searchqa": "SearchQA", "triviaqa": "TriviaQA", "hotpotqa": "HotpotQA", "bird": "BIRD"}
+FIXED_SPLITS = {
+    "searchqa": SPLIT_SPEC,
+    "triviaqa": {
+        "train": (1600, "f465cbaea5820ac4a01a9d0f5d6dc6b71668a78bf21cf783c687e3f181ac3445"),
+        "val": (200, "c2b8957c0814fc54e381821f2efb6af200bae1e26605304ca3bac7c10747176c"),
+        "test": (1000, "34c26854b2b9348c90fb740675bf45562937c1525f5a770824474e0b6df6397c"),
+    },
+    "hotpotqa": {
+        "train": (1600, "925adec60c7d1488b925b5c5facaaeb9b0f2d60b155928db809fde778433a6d9"),
+        "val": (200, "9022dabfa5ddd7a7df3a32eee1a8abbab8963ea807013f257dbefb1250d3d82b"),
+        "test": (1000, "7b81664c3206ab4a9d4e3bd274a7bbe7b7d09976c74918970a02ecbb463b7439"),
+    },
+    "bird": {
+        "train": (834, "bf49ab424f7627116e654bb8719fdee322031a35da199aa04b6c370ae0c281b3"),
+        "val": (200, "2b3ab585858e168cb05ab1cf2ce8ceb4ecd24a4ae2d375d89ba9d94a362b19d1"),
+        "test": (500, "706fcd80ba2577502ed013f49f22ceac5071af0dbfe58adb6fe22ee030b2487f"),
+    },
+}
+
+
+def load_splits(split_dir=None, benchmark="searchqa"):
+    default_data = Path(__file__).resolve().parents[2] / "SkillOpt/data" / f"{benchmark}_split"
+    data = Path(split_dir or os.environ.get(f"{benchmark.upper()}_SPLIT_DIR") or default_data)
     splits = {}
-    for split, (count, fingerprint) in SPLIT_SPEC.items():
+    required = ("question", "prompt", "SQL", "db_id") if benchmark == "bird" else ("question", "context")
+    for split, (count, fingerprint) in FIXED_SPLITS[benchmark].items():
         path = data / split / "items.json"
         rows = json.loads(path.read_text(encoding="utf-8"))
         ids = [row["id"] for row in rows]
         if len(ids) != count or hashlib.sha256("\n".join(ids).encode()).hexdigest() != fingerprint:
-            raise ValueError(f"{path} must contain the {count} fixed SearchQA IDs in release order")
+            raise ValueError(f"{path} must contain the {count} fixed {BENCHMARK_NAMES[benchmark]} IDs in release order")
         for row in rows:
-            if not all(isinstance(row.get(k), str) and row[k].strip() for k in ("question", "context")):
-                raise ValueError(f"Missing question or context in {split}/{row['id']}")
-            answers = row.get("answers")
-            if not isinstance(answers, list) or not answers or not all(isinstance(a, str) for a in answers):
-                raise ValueError(f"Invalid reference answers in {split}/{row['id']}")
+            if not all(isinstance(row.get(k), str) and row[k].strip() for k in required):
+                raise ValueError(f"Missing required {BENCHMARK_NAMES[benchmark]} field in {split}/{row['id']}")
+            if benchmark != "bird":
+                answers = row.get("answers")
+                if not isinstance(answers, list) or not answers or not all(isinstance(a, str) for a in answers):
+                    raise ValueError(f"Invalid reference answers in {split}/{row['id']}")
         splits[split] = rows
     return splits
 
@@ -79,41 +103,48 @@ def score_response(response, answers):
     return {"em": em, "f1": best_f1, "predicted_answer": answer}
 
 
-def instances(rows):
-    return [
-        TaskInstance(
+def instances(rows, benchmark="searchqa", db_root=DEFAULT_DB_ROOT):
+    if benchmark == "bird":
+        return [TaskInstance(
             instance_id=row["id"],
-            input=format_question(row),
-            ground_truth=row["answers"],
-            metadata={"benchmark": "searchqa"},
-        )
-        for row in rows
-    ]
+            input=row["prompt"],
+            ground_truth=row["SQL"],
+            metadata={"benchmark": "bird", "db_id": row["db_id"],
+                      "db_path": str(database_path(Path(db_root), row["db_id"]))},
+        ) for row in rows]
+    return [TaskInstance(
+        instance_id=row["id"],
+        input=format_question(row),
+        ground_truth=row["answers"],
+        metadata={"benchmark": benchmark},
+    ) for row in rows]
 
 
-def test_metrics(result, expected_ids):
+def test_metrics(result, expected_ids, benchmark="searchqa"):
     trajectories = result.trajectories
     if len(trajectories) != len(expected_ids) or {t.instance_id for t in trajectories} != expected_ids:
-        raise ValueError("SearchQA test trajectories do not match the fixed test IDs")
-    em = f1 = 0.0
-    errors = 0
-    for traj in trajectories:
-        if traj.metadata.get("agent_exception"):
-            errors += 1
-            continue
-        grade = traj.metadata["searchqa_eval"]
-        em += grade["em"]
-        f1 += grade["f1"]
+        raise ValueError(f"{BENCHMARK_NAMES[benchmark]} test trajectories do not match the fixed test IDs")
     n = len(expected_ids)
-    return {"n": n, "em": em / n, "f1": f1 / n, "agent_errors": errors}
+    grades = [t.metadata[f"{benchmark}_eval"] for t in trajectories if not t.metadata.get("agent_exception")]
+    metrics = {"n": n, "agent_errors": n - len(grades)}
+    if benchmark == "bird":
+        metrics.update(ex=sum(g["ex"] for g in grades) / n,
+                       sql_errors=sum(g["exec_status"] == "error" for g in grades),
+                       sql_timeouts=sum(g["exec_status"] == "timeout" for g in grades))
+    else:
+        metrics.update(em=sum(g["em"] for g in grades) / n, f1=sum(g["f1"] for g in grades) / n)
+    return metrics
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--split-dir", help="Materialized SkillOpt SearchQA split directory")
+    parser.add_argument("--benchmark", choices=tuple(BENCHMARK_NAMES), default="searchqa")
+    parser.add_argument("--split-dir", help="Directory with the materialized fixed splits")
+    parser.add_argument("--db-root", type=Path, default=os.environ.get("BIRD_DB_ROOT", DEFAULT_DB_ROOT),
+                        help="Root of the BIRD read-only SQLite databases")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--skill-repo", help="Test an existing SkillGen output directory (skip training)")
-    parser.add_argument("--output", type=Path, help="New directory for held-out test results")
+    parser.add_argument("--output", type=Path, help="New results directory (also contains training artifacts for the three new tasks)")
     parser.add_argument("--dev-early-stop", action="store_true", help="Evaluate candidate dev in ranked batches")
     parser.add_argument("--dev-order", choices=("hard-first", "easy-first"), default="hard-first")
     parser.add_argument("--dev-batch-size", type=int, default=4)
@@ -127,9 +158,17 @@ def main():
         parser.error("--dev-early-accept requires --dev-early-stop")
     if args.skill_repo and args.dev_early_stop:
         parser.error("--skill-repo skips training and has no candidate dev to evaluate")
-    splits = load_splits(args.split_dir)
+    name = args.benchmark
+    if args.dev_early_stop and name != "searchqa":
+        parser.error("--dev-early-stop is currently implemented for SearchQA only")
+    splits = load_splits(args.split_dir, name)
+    if name == "bird":
+        for db_id in sorted({row["db_id"] for split in splits.values() for row in split}):
+            db = database_path(Path(args.db_root), db_id)
+            if not db.is_file():
+                parser.error(f"Missing BIRD database: {db}")
     if args.check:
-        print("SearchQA:", {split: len(rows) for split, rows in splits.items()})
+        print(BENCHMARK_NAMES[name] + ":", {split: len(rows) for split, rows in splits.items()})
         return
     if args.output is None:
         parser.error("--output is required for training or testing")
@@ -149,23 +188,24 @@ def main():
         from benchmarks.searchqa_dev import DevEarlyStop
         dev = DevEarlyStop(args.dev_order, args.dev_batch_size, args.dev_early_accept) if args.dev_early_stop else None
         skill = run_pipeline(
-            instances(splits["train"]), TaskType.BINARY,
-            verification_instances=instances(splits["val"]),
-            config_path=args.config, dataset_id="searchqa", task_name="SearchQA",
+            instances(splits["train"], name, args.db_root), TaskType.BINARY,
+            verification_instances=instances(splits["val"], name, args.db_root),
+            config_path=args.config, dataset_id=name, task_name=BENCHMARK_NAMES[name],
+            output_root=args.output if name != "searchqa" else None,
             dev_early_stop=dev,
         )
 
     model_cfg = cfg["models"]
     model = model_cfg.get("verification_agent", model_cfg["default"])
     judge = model_cfg.get("verification_judge", model_cfg["default"])
-    test = instances(splits["test"])
+    test = instances(splits["test"], name, args.db_root)
     expected_ids = {inst.instance_id for inst in test}
     workers = cfg["pipeline"].get("max_workers", 16)
     llm.reset_token_stats()
     with llm.stage_scope("test_baseline"):
         baseline = run_condition(test, TaskType.BINARY, model, judge, None, workers)
     write_trajectories(args.output / "baseline.jsonl", baseline.trajectories)
-    baseline_metrics = test_metrics(baseline, expected_ids)
+    baseline_metrics = test_metrics(baseline, expected_ids, name)
     deployed = bool(skill and skill.status != SkillStatus.DEPRECATED and (skill.body or "").strip())
     final_metrics = baseline_metrics
     if deployed:
@@ -173,10 +213,12 @@ def main():
             final = run_condition(test, TaskType.BINARY, model, judge, skill, workers,
                                   execute_scripts=bool(skill.scripts))
         write_trajectories(args.output / "skill.jsonl", final.trajectories)
-        final_metrics = test_metrics(final, expected_ids)
+        final_metrics = test_metrics(final, expected_ids, name)
     llm.dump_token_stats(args.output / "test_token_usage.json")
     summary = {"model": model, "skill_id": skill.skill_id if skill else None,
                "skill_deployed": deployed, "baseline": baseline_metrics, "final": final_metrics}
+    if name != "searchqa":
+        summary["benchmark"] = name
     write_json(args.output / "summary.json", summary)
     print(summary)
 
