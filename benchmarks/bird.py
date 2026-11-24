@@ -45,9 +45,22 @@ def extract_sql(response: str) -> str:
     return content
 
 
-def _authorize(action, _arg1, _arg2, _db, _source):
-    # Prevent ATTACH and VACUUM INTO from opening or creating a second database.
-    return sqlite3.SQLITE_DENY if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH) else sqlite3.SQLITE_OK
+_SCHEMA_PRAGMAS = {
+    "table_info", "table_xinfo", "table_list", "index_info", "index_xinfo",
+    "index_list", "foreign_key_list", "database_list", "compile_options",
+}
+
+
+def _authorize(action, arg1, arg2, _db, _source):
+    # Read-only connections protect the main database. Also confine the
+    # submitted statement to that connection and permit schema inspection.
+    if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_PRAGMA and (arg1 or "").lower() not in _SCHEMA_PRAGMAS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_FUNCTION and (arg2 or "").lower() in ("load_extension", "writefile"):
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
 
 
 def score_response(response: str, gold_sql: str, db_path: str | Path, timeout: float = 30.0) -> dict:

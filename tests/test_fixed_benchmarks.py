@@ -14,6 +14,21 @@ from models import CandidateSkill, SkillAnalysis
 
 
 class BirdExecution(unittest.TestCase):
+    def test_schema_queries_and_connection_settings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "fixture.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE sample(v)")
+                db.commit()
+            result = bird.score_response("SELECT name FROM pragma_table_info('sample')", "SELECT 'v'", path)
+            self.assertEqual((result["ex"], result["exec_status"]), (1, "ok"))
+            for setting in ("query_only=OFF", "user_version=1"):
+                result = bird.score_response(f"PRAGMA {setting}", "SELECT 0", path)
+                self.assertEqual(result["exec_status"], "error")
+            for function in ("load_extension", "writefile"):
+                self.assertEqual(bird._authorize(sqlite3.SQLITE_FUNCTION, None, function, None, None),
+                                 sqlite3.SQLITE_DENY)
+
     def test_extraction_and_single_read_only_database(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "fixture.sqlite"
